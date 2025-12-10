@@ -23,21 +23,6 @@ def loadAdaptation():
 
 dictAdaptation = loadAdaptation()
 
-print (dictAdaptation.keys())
-x_pos_1 = dictAdaptation['ev_x']
-y_pos_1 = dictAdaptation['ev_y']
-
-x_pos_2 = dictAdaptation['fs_x']
-y_pos_2 = dictAdaptation['fs_y']
-
-x_pos_3 = dictAdaptation['ge_x']
-y_pos_3 = dictAdaptation['ge_y']
-
-x_pos_4 = dictAdaptation['jc_x']
-y_pos_4 = dictAdaptation['jc_y']
-
-x_pos_5 = dictAdaptation['jl_x']
-y_pos_5 = dictAdaptation['jl_y']
 
 def reorder_all_participants(dictAdaptation):
     seq = dictAdaptation['sequence']
@@ -66,11 +51,16 @@ def reorder_all_participants(dictAdaptation):
     return dictReordered
 
 dictReorder = reorder_all_participants(dictAdaptation = dictAdaptation)
+print(dictReorder["ev"]["x"][0] )
+print(dictReorder["ev"]["x"][50] )
+
 
 def compute_peak_lateral(X):
 
     peak_x = np.max(X, axis=1)
-    return peak_x
+    x_start = X[:, 0]
+    peak_correct = peak_x - x_start
+    return peak_correct
 
 def plot_peak_adaptation(X, participant_label="ev", window=8):
     peak_x = compute_peak_lateral(X)
@@ -106,17 +96,98 @@ def mean_traj_with_std(X_al, Y_al, start, end):
 
     return mean_x, std_x, mean_y
 
-
-def align_trials_Y_only(X, Y):
+def align_and_crop_trials(X, Y, y_thresh=0.005):
     """
-    Aligne les trajectoires seulement sur Y, pas sur X.
+    1) Aligne chaque essai pour que le point de départ soit (0,0)
+    2) Coupe le début de la trajectoire à partir du moment où Y dépasse y_thresh
+       (après alignement), pour ne garder que la phase de mouvement.
+    Retourne des trajectoires de même longueur pour tous les essais.
     """
+    n_trials, n_points = X.shape
 
-    Y0 = Y[:, [0]]             # (n_trials, 1)
-    Y_al = Y - Y0              # alignement
-    X_al = X.copy()            # X intact
+    # Alignement spatial
+    X0 = X[:, [0]]
+    Y0 = Y[:, [0]]
+    X_rel = X - X0
+    Y_rel = Y - Y0
 
-    return X_al, Y_al
+    # Détection du début de mouvement (premier Y_rel > y_thresh)
+    onset_indices = []
+    for i in range(n_trials):
+        idx = np.where(Y_rel[i, :] > y_thresh)[0]
+        if len(idx) == 0:
+            onset_indices.append(0)
+        else:
+            onset_indices.append(idx[0])
+
+    onset_indices = np.array(onset_indices)
+
+    # Longueur commune (pour que toutes les trajectoires aient la même taille)
+    max_len = n_points - onset_indices
+    L = max_len.min()  # longueur minimale dispo parmi les essais
+
+    X_out = np.zeros((n_trials, L))
+    Y_out = np.zeros((n_trials, L))
+
+    for i in range(n_trials):
+        start = onset_indices[i]
+        X_out[i, :] = X_rel[i, start:start+L]
+        Y_out[i, :] = Y_rel[i, start:start+L]
+
+    return X_out, Y_out
+
+
+def align_trials_Y_only(X, Y, y_thresh = 0.005):          
+
+    n_trials, n_points = X.shape
+
+    # Alignement spatial
+    X0 = X[:, [0]]
+    Y0 = Y[:, [0]]
+    X_rel = X - X0
+    Y_rel = Y - Y0
+
+    X_out = np.zeros_like(X_rel)
+    Y_out = np.zeros_like(Y_rel)
+
+    for i in range(n_trials):
+        # indices où le mouvement commence (Y > y_thresh)
+        idx = np.where(Y_rel[i, :] > y_thresh)[0]
+
+        if len(idx) == 0:
+            # pas de mouvement détecté -> on garde tel quel
+            onset = 0
+        else:
+            onset = idx[0]
+
+        # on décale la trajectoire pour commencer au début du mouvement
+        length_after_onset = n_points - onset
+
+        # partie active (du début du mouvement jusqu'à la fin des données)
+        X_active = X_rel[i, onset:]
+        Y_active = Y_rel[i, onset:]
+
+        # si la partie active est plus courte que la longueur totale,
+        # on complète la fin avec la dernière valeur
+        if length_after_onset < n_points:
+            X_padded = np.empty(n_points)
+            Y_padded = np.empty(n_points)
+
+            X_padded[:length_after_onset] = X_active
+            X_padded[length_after_onset:] = X_active[-1]
+
+            Y_padded[:length_after_onset] = Y_active
+            Y_padded[length_after_onset:] = Y_active[-1]
+        else:
+            # pile la bonne longueur
+            X_padded = X_active
+            Y_padded = Y_active
+
+        X_out[i, :] = X_padded
+        Y_out[i, :] = Y_padded
+
+    return X_out, Y_out
+
 
 
 def plot_mean_trajs_3_blocks(X, Y, participant_label="ev"):
@@ -165,6 +236,7 @@ def plot_group_peak_adaptation(group_peaks, window=8):
     Plot d'adaptation groupé : mean ± SEM sur les participants.
     """
     n_participants, n_trials = group_peaks.shape
+    trials = np.arange(1, n_trials+1)
 
     mean_peak = group_peaks.mean(axis=0)
     sem_peak  = group_peaks.std(axis=0) / np.sqrt(n_participants)
@@ -177,14 +249,14 @@ def plot_group_peak_adaptation(group_peaks, window=8):
     plt.figure(figsize=(10, 5))
 
     # Bande SEM
-    plt.fill_between(n_trials,
+    plt.fill_between(trials,
                      mean_peak - sem_peak,
                      mean_peak + sem_peak,
                      color="orange", alpha=0.3,
                      label="± SEM (5 participants)")
 
     # Courbe moyenne lissée
-    plt.plot(n_trials, mean_peak, color="red", linewidth=2.5,
+    plt.plot(trials, mean_peak, color="red",
              label="Mean peak lateral")
 
     plt.axhline(0, color="grey", linestyle="--", linewidth=1)
@@ -193,7 +265,8 @@ def plot_group_peak_adaptation(group_peaks, window=8):
     plt.title("Adaptation to the force field - Group average (5 participants)")
     plt.legend()
     plt.grid(True, linestyle=":", alpha=0.5)
-    plt.savefig(".../plots")
+    #plt.xlim(0,100)
+    #plt.savefig("plots/peaks_mean_corrected.pdf")
     plt.show()
 
 def compute_group_block_mean_traj(dictReorder, start, end):
@@ -263,6 +336,7 @@ def plot_group_mean_trajs_3_blocks(dictReorder):
     plt.axis("equal")
     plt.grid(True, linestyle=":", alpha=0.5)
     plt.legend()
+    plt.savefig("plots/mean_trajectories_tempalign.pdf")
     plt.show()
     
 participants = ["ev", "fs", "ge", "jc", "jl"]
@@ -272,7 +346,7 @@ for p in participants :
     Y = dictReorder[p]["y"]
 
     #plot_mean_trajs_3_blocks(X, Y, participant_label=p)
-    plot_peak_adaptation(X, participant_label=p)
+    #plot_peak_adaptation(X, participant_label=p)
 
 group_peaks = get_group_peak_matrix(dictReorder)
 plot_group_peak_adaptation(group_peaks)
